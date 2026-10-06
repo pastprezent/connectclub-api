@@ -4,11 +4,106 @@ import { JvbusterClient } from './jvbuster-client/index.js';
 const urlParams = new URLSearchParams(location.search);
 const videoBandwidth = urlParams.get('videoBandwidth') || 400;
 const audioBandwidth = urlParams.get('audioBandwidth') || 64;
-const forcePassiveDtls = urlParams.get('forcePassiveDtls') || false;
+// Default must stay false: Chrome as DTLS-passive + JVB not initiating leaves dtlsState=connecting forever.
+const forcePassiveDtls = urlParams.get('forcePassiveDtls') === 'true';
 const simulcast = urlParams.get('simulcast') || false;
+
+if (forcePassiveDtls) {
+    console.warn(
+        'forcePassiveDtls=true: Chrome will not send DTLS ClientHello. ' +
+        'Only use when JVB is known to initiate; otherwise connection stays dtlsState=connecting.'
+    );
+}
 
 let peerConnection = null;
 let jvbusterClient = null;
+
+/** Wait until ICE gathering finishes (no trickle ICE in this page). Timeout resolves so we still send whatever candidates we have. */
+function waitIceGatheringComplete(pc, timeoutMs) {
+    return new Promise(function (resolve) {
+        if (pc.iceGatheringState === 'complete') {
+            resolve();
+            return;
+        }
+        var done = false;
+        var t = setTimeout(function () {
+            if (!done) {
+                done = true;
+                console.warn('ICE gathering timeout after', timeoutMs || 5000, 'ms; state=', pc.iceGatheringState);
+                resolve();
+            }
+        }, timeoutMs || 5000);
+        pc.addEventListener('icegatheringstatechange', function onChange() {
+            if (pc.iceGatheringState === 'complete' && !done) {
+                done = true;
+                clearTimeout(t);
+                pc.removeEventListener('icegatheringstatechange', onChange);
+                resolve();
+            }
+        });
+    });
+}
+
+/**
+ * jvbuster SignalingController only binds SSRCs from m-lines with a=sendrecv.
+ * Chrome often answers a=sendonly for a screen publisher → gray room. Force sendrecv on
+ * outbound audio/video m-lines that already carry SSRCs.
+ */
+function forceSendRecvWhereSending(sdp) {
+    var nl = String.fromCharCode(13) + String.fromCharCode(10);
+    var parts = sdp.split(nl + 'm=');
+    for (var i = 1; i < parts.length; i++) {
+        var body = parts[i];
+        var isAv = body.indexOf('audio ') === 0 || body.indexOf('video ') === 0;
+        if (!isAv) continue;
+        if (body.indexOf('a=ssrc:') === -1) continue;
+        body = body.split('a=sendonly').join('a=sendrecv');
+        body = body.split('a=recvonly').join('a=sendrecv');
+        parts[i] = body;
+    }
+    return parts.join(nl + 'm=');
+}
+
+/** Chrome rejects a=mid longer than 16 chars; shorten for setRemoteDescription and restore for jvbuster. */
+function createMidRewriter() {
+    const midMap = {};
+    let midSeq = 0;
+
+    function shortenMids(s) {
+        s = s.replace(/a=mid:([^\r\n]+)/g, function (full, mid) {
+            if (mid.length <= 16) return full;
+            if (!midMap[mid]) midMap[mid] = 'm' + (midSeq++);
+            return 'a=mid:' + midMap[mid];
+        });
+        const bundle = s.match(/a=group:BUNDLE([^\r\n]*)/);
+        if (bundle) {
+            let line = bundle[0];
+            Object.keys(midMap).forEach(function (longMid) {
+                line = line.split(longMid).join(midMap[longMid]);
+            });
+            s = s.split(bundle[0]).join(line);
+        }
+        return s;
+    }
+
+    function restoreMids(s) {
+        Object.keys(midMap).forEach(function (longMid) {
+            const shortMid = midMap[longMid];
+            s = s.split('a=mid:' + shortMid).join('a=mid:' + longMid);
+        });
+        const bundle = s.match(/a=group:BUNDLE([^\r\n]*)/);
+        if (bundle) {
+            let line = bundle[0];
+            Object.keys(midMap).forEach(function (longMid) {
+                line = line.split(midMap[longMid]).join(longMid);
+            });
+            s = s.split(bundle[0]).join(line);
+        }
+        return s;
+    }
+
+    return { midMap, shortenMids, restoreMids };
+}
 
 // Helper method to munge an SDP to enable simulcasting (Chrome only)
 function mungeSdpForSimulcasting(sdp) {
@@ -281,19 +376,28 @@ async function start() {
             .build()
 
         const sdpOffers = await jvbusterClient.start(true);
+        const { shortenMids, restoreMids } = createMidRewriter();
+        // Shorten long mids (e.g. confId-*) for Chrome; restore only when calling processAnswers.
+        let offerSdp = shortenMids(sdpOffers[0].text);
         await peerConnection.setRemoteDescription({
             type: 'offer',
-            sdp: sdpOffers[0].text
+            sdp: offerSdp
         });
         const answer = await peerConnection.createAnswer();
         if (forcePassiveDtls) {
-            answer.sdp = answer.sdp.replaceAll('a=setup:active', 'a=setup:passive')
+            answer.sdp = answer.sdp.replaceAll('a=setup:active', 'a=setup:passive');
         }
+        // Ensure jvbuster legacy /signaling/answers can bind publisher SSRCs (requires a=sendrecv).
+        answer.sdp = forceSendRecvWhereSending(answer.sdp);
         if (simulcast) {
             answer.sdp = mungeSdpForSimulcasting(answer.sdp);
         }
         await peerConnection.setLocalDescription(answer);
-        await jvbusterClient.processAnswers([answer.sdp]);
+        // Legacy answers endpoint needs a=candidate: in the SDP (no trickle on this page).
+        await waitIceGatheringComplete(peerConnection, 5000);
+        let sdpForJvb = restoreMids(peerConnection.localDescription.sdp);
+        sdpForJvb = forceSendRecvWhereSending(sdpForJvb);
+        await jvbusterClient.processAnswers([sdpForJvb]);
     } catch (e) {
         alert(e);
         await stop();
