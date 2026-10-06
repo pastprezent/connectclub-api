@@ -21,7 +21,14 @@ class JwtToken
 
     public function getJWTClaim(?string $token): ?string
     {
-        if ($_ENV['APP_ENV'] == 'codeception') {
+        // codeception + self-host STAGE / explicit DISABLE_SMS_JWT: skip RSA+jti check
+        // (Electron webSafeImports sends HS256 stub without jti). Same idea as tests.
+        // Documented trigger: STAGE=1 (demo compose) OR DISABLE_SMS_JWT=1.
+        if (
+            $_ENV['APP_ENV'] == 'codeception'
+            || (string) ($_ENV['DISABLE_SMS_JWT'] ?? '') === '1'
+            || $_ENV['STAGE'] == 1
+        ) {
             return Uuid::uuid4()->toString();
         }
 
