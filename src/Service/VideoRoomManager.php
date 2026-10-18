@@ -44,6 +44,10 @@ class VideoRoomManager
         $community = new Community($owner, $name, $description);
         $videoRoom = $community->videoRoom;
         $videoRoom->type = VideoRoom::TYPE_NEW;
+        // Do not rely on Jitsi CONFERENCE_CREATED webhook for feed visibility.
+        // STAGE docker-compose jvbuster defaults JVB_CONFERENCE_NOTIFICATION_URL to
+        // 127.0.0.1 inside the bridge, so OnRoomCreateSubscriber never runs.
+        $videoRoom->startedAt = time();
 
         $videoRoom->config->backgroundRoomHeightMultiplier = $draft->backgroundRoomHeightMultiplier;
         $videoRoom->config->backgroundRoomWidthMultiplier = $draft->backgroundRoomWidthMultiplier;

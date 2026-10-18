@@ -271,6 +271,16 @@ class VideoRoomController extends BaseController
             $eventLogManager->logEvent($meeting, 'create_meeting_by_token');
         }
 
+        // Backfill started_at on join when Jitsi CONFERENCE_CREATED never reached the API
+        // (STAGE compose jvbuster notification URL defaults to 127.0.0.1).
+        // findOnlineVideoRoom requires started_at for type=new rooms.
+        if ($room->type === VideoRoom::TYPE_NEW && $room->startedAt === null) {
+            $room->startedAt = time();
+            $entityManager->persist($room);
+            $entityManager->flush();
+            $eventLogManager->logEvent($room, 'started_at_set_on_token');
+        }
+
         $expiresAt = ConnectClub::VIDEO_ROOM_SESSION_EXPIRES_AT;
 
         $time = new DateTimeImmutable();
