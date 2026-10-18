@@ -2,7 +2,9 @@
 
 namespace App\EventSubscriber\Twilio;
 
-use App\Annotation\Lock;
+use App\Entity\VideoChat\VideoMeeting;
+use App\Entity\VideoChat\VideoMeetingParticipant;
+use App\Entity\VideoChat\VideoRoom;
 use App\Event\VideoRoomEvent;
 use App\Event\VideoRoomParticipantDisconnectedEvent;
 use App\Repository\UserRepository;
@@ -108,6 +110,65 @@ class OnRoomParticipantDisconnectedSubscriber implements EventSubscriberInterfac
 
         $videoRoomActiveMeetingParticipant->participant->onlineInVideoRoom = false;
         $this->userRepository->save($videoRoomActiveMeetingParticipant->participant);
+
+        $this->markRoomDoneIfLastParticipantLeft($event->videoRoom, $videoRoomActiveMeeting, $event);
+    }
+
+    /**
+     * When the last participant leaves a type=new room, set done_at so «Идёт сейчас»
+     * drops the room without waiting solely for CONFERENCE_EXPIRED.
+     * CONFERENCE_EXPIRED (OnRoomEndedSubscriber) remains the full meeting teardown path.
+     */
+    private function markRoomDoneIfLastParticipantLeft(
+        VideoRoom $videoRoom,
+        VideoMeeting $videoRoomActiveMeeting,
+        VideoRoomParticipantDisconnectedEvent $event
+    ): void {
+        if ($videoRoom->type !== VideoRoom::TYPE_NEW) {
+            return;
+        }
+
+        if ($videoRoom->alwaysOnline || $videoRoom->doneAt !== null) {
+            return;
+        }
+
+        $lock = $this->lockFactory->createLock(
+            'jistiCounterForVideoRoom_'.$videoRoom->community->name,
+            10,
+            true
+        );
+        $lock->acquire(true);
+
+        try {
+            $videoRoom = $this->videoRoomRepository->refresh($videoRoom);
+            if ($videoRoom->doneAt !== null) {
+                return;
+            }
+
+            $onlineParticipants = $videoRoomActiveMeeting
+                ->participants
+                ->filter(fn (VideoMeetingParticipant $p) => !$p->endTime);
+
+            if ($onlineParticipants->count() > 0) {
+                return;
+            }
+
+            $videoRoom->doneAt = time();
+            $this->videoRoomRepository->save($videoRoom);
+
+            if ($videoRoomActiveMeeting->endTime === null) {
+                $videoRoomActiveMeeting->endTime = $event->unixTimestamp;
+                $this->videoMeetingRepository->save($videoRoomActiveMeeting);
+            }
+
+            $this->eventLogManager->logEvent(
+                $videoRoom,
+                'done_at_set_on_last_endpoint_expired',
+                $event->getContext()
+            );
+        } finally {
+            $lock->release();
+        }
     }
 
     public static function getSubscribedEvents()
