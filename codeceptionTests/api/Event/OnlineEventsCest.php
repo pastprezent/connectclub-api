@@ -487,4 +487,52 @@ class OnlineEventsCest extends BaseCest
         $I->sendGet('/v1/event/online');
         $I->assertCount(0, $I->grabDataFromResponseByJsonPath('$.response.items')[0]);
     }
+
+    /**
+     * Branch B: ad-hoc room with video_room.language_id must also match viewer
+     * users.languages JSON (not only user_language M2M). Profile PATCH writes JSON only.
+     */
+    public function testAdHocLanguageIdMatchesViewerLanguagesJson(ApiTester $I)
+    {
+        $I->loadFixtures(new class extends Fixture {
+            public function load(ObjectManager $manager)
+            {
+                $languageRepository = $manager->getRepository(User\Language::class);
+
+                $main = $manager->getRepository('App:User')->findOneBy(['email' => BaseCest::MAIN_USER_EMAIL]);
+                $alice = $manager->getRepository('App:User')->findOneBy(['email' => BaseCest::ALICE_USER_EMAIL]);
+
+                $manager->persist(new Follow($main, $alice));
+
+                $russian = $languageRepository->findOneBy(['code' => 'RU']);
+
+                // JSON only — no user_language M2M row for main (simulates Dig profile languages[])
+                $main->languages = ['RU'];
+                $manager->persist($main);
+
+                $communityAlice = new Community($alice, '6051c4c478815', 'Community Alice');
+                $communityAlice->password = '6051c4c478815';
+                $communityAlice->videoRoom->type = VideoRoom::TYPE_NEW;
+                $communityAlice->videoRoom->startedAt = time();
+                $communityAlice->videoRoom->language = $russian;
+                $meeting = new VideoMeeting($communityAlice->videoRoom, uniqid(), time());
+                $communityAlice->videoRoom->config->withSpeakers = true;
+                $meeting->participants->add(new VideoMeetingParticipant($meeting, $alice, time(), null, true));
+                $communityAlice->videoRoom->meetings->add($meeting);
+                $communityAlice->createdAt = time();
+                $manager->persist($communityAlice);
+
+                $manager->flush();
+            }
+        });
+
+        $I->amBearerAuthenticated(self::MAIN_ACCESS_TOKEN);
+        $I->sendGet('/v1/event/online');
+        $I->seeResponseCodeIs(HttpCode::OK);
+
+        $items = $I->grabDataFromResponseByJsonPath('$.response.items')[0];
+        $I->assertCount(1, $items);
+        $I->assertEquals('Community Alice', $items[0]['title']);
+        $I->assertEquals('6051c4c478815', $items[0]['roomId']);
+    }
 }

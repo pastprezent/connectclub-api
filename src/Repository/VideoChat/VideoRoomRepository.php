@@ -249,15 +249,25 @@ class VideoRoomRepository extends ServiceEntityRepository
                         )
                         OR
                         (
+                            -- Ad-hoc room with language_id (branch B):
+                            -- match viewer user_language M2M OR users.languages JSON
+                            -- (profile PATCH writes JSON only; older clients still set language_id)
                             vr.event_schedule_id IS NULL 
                             AND
                             vr.language_id IS NOT NULL
                             AND 
-                            EXISTS (
-                                SELECT 1 
-                                FROM user_language ul 
-                                WHERE ul.language_id = vr.language_id 
-                                AND ul.user_id = :userId
+                            (
+                                EXISTS (
+                                    SELECT 1 
+                                    FROM user_language ul 
+                                    WHERE ul.language_id = vr.language_id 
+                                    AND ul.user_id = :userId
+                                )
+                                OR
+                                jsonb_exists(
+                                    (SELECT u.languages FROM users u WHERE u.id = :userId)::jsonb,
+                                    (SELECT lang.code FROM language lang WHERE lang.id = vr.language_id)
+                                )
                             )
                         )
                         OR
