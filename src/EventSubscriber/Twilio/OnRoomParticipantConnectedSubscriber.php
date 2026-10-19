@@ -5,6 +5,7 @@ namespace App\EventSubscriber\Twilio;
 use App\Entity\Event\EventScheduleInterest;
 use App\Entity\Interest\Interest;
 use App\Entity\VideoChat\VideoMeetingParticipant;
+use App\Entity\VideoChat\VideoRoom;
 use App\Entity\VideoChat\VideoRoomHistory;
 use App\Event\VideoRoomEvent;
 use App\Event\VideoRoomParticipantConnectedEvent;
@@ -120,6 +121,8 @@ class OnRoomParticipantConnectedSubscriber implements EventSubscriberInterface
             }
         }
 
+        $this->reopenRoomIfDone($videoRoomActiveMeeting->videoRoom, $event);
+
         $videoRoomHistory = $this->videoRoomHistoryRepository->findOneBy([
             'videoRoom' => $videoRoomActiveMeeting->videoRoom,
             'user' => $user,
@@ -201,6 +204,42 @@ class OnRoomParticipantConnectedSubscriber implements EventSubscriberInterface
             'endpoint_created_create_participant',
             $event->getContext()
         );
+    }
+
+    /**
+     * A live endpoint means the room is ongoing. done_at may have been set by the
+     * ENDPOINT_EXPIRED that jvbuster emits right before ENDPOINT_CREATED on reconnect.
+     */
+    private function reopenRoomIfDone(VideoRoom $videoRoom, VideoRoomParticipantConnectedEvent $event): void
+    {
+        if ($videoRoom->type !== VideoRoom::TYPE_NEW || $videoRoom->doneAt === null) {
+            return;
+        }
+
+        $lock = $this->lockFactory->createLock(
+            'jistiCounterForVideoRoom_'.$videoRoom->community->name,
+            10,
+            true
+        );
+        $lock->acquire(true);
+
+        try {
+            $videoRoom = $this->videoRoomRepository->refresh($videoRoom);
+            if ($videoRoom->doneAt === null) {
+                return;
+            }
+
+            $this->eventLogManager->logEvent(
+                $videoRoom,
+                'reopen_room_on_endpoint_created',
+                array_merge($event->getContext(), ['lastValue' => $videoRoom->doneAt])
+            );
+
+            $videoRoom->doneAt = null;
+            $this->videoRoomRepository->save($videoRoom);
+        } finally {
+            $lock->release();
+        }
     }
 
     public static function getSubscribedEvents(): array

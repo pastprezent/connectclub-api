@@ -26,6 +26,8 @@ class CloseEmptyOnlineVideoRoomsCommand extends Command
     protected static $defaultName = 'CloseEmptyOnlineVideoRoomsCommand';
     protected static $defaultDescription = 'Set done_at on empty type=new online rooms';
 
+    private const GRACE_SECONDS = 60;
+
     private VideoRoomRepository $videoRoomRepository;
     private VideoMeetingRepository $videoMeetingRepository;
     private EventLogManager $eventLogManager;
@@ -66,6 +68,7 @@ class CloseEmptyOnlineVideoRoomsCommand extends Command
         foreach ($rooms as $videoRoom) {
             $hadParticipant = false;
             $hasOnline = false;
+            $lastLeftAt = 0;
 
             foreach ($videoRoom->meetings as $meeting) {
                 /** @var VideoMeeting $meeting */
@@ -76,10 +79,16 @@ class CloseEmptyOnlineVideoRoomsCommand extends Command
                         $hasOnline = true;
                         break 2;
                     }
+                    $lastLeftAt = max($lastLeftAt, $participant->endTime);
                 }
             }
 
             if (!$hadParticipant || $hasOnline) {
+                continue;
+            }
+
+            // Client reconnects briefly leave zero online participants (expire old endpoint, then create new).
+            if (time() - $lastLeftAt < self::GRACE_SECONDS) {
                 continue;
             }
 

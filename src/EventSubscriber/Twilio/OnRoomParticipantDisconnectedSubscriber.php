@@ -3,7 +3,6 @@
 namespace App\EventSubscriber\Twilio;
 
 use App\Entity\VideoChat\VideoMeeting;
-use App\Entity\VideoChat\VideoMeetingParticipant;
 use App\Entity\VideoChat\VideoRoom;
 use App\Event\VideoRoomEvent;
 use App\Event\VideoRoomParticipantDisconnectedEvent;
@@ -117,7 +116,12 @@ class OnRoomParticipantDisconnectedSubscriber implements EventSubscriberInterfac
     /**
      * When the last participant leaves a type=new room, set done_at so «Идёт сейчас»
      * drops the room without waiting solely for CONFERENCE_EXPIRED.
-     * CONFERENCE_EXPIRED (OnRoomEndedSubscriber) remains the full meeting teardown path.
+     *
+     * The meeting is intentionally left open: jvbuster deletes the old endpoint before
+     * creating a new one on every client reconnect, so ENDPOINT_EXPIRED for the only
+     * participant is usually followed by ENDPOINT_CREATED, which must still resolve the
+     * active meeting and reopen the room (OnRoomParticipantConnectedSubscriber).
+     * CONFERENCE_EXPIRED (OnRoomEndedSubscriber) remains the meeting teardown path.
      */
     private function markRoomDoneIfLastParticipantLeft(
         VideoRoom $videoRoom,
@@ -145,21 +149,17 @@ class OnRoomParticipantDisconnectedSubscriber implements EventSubscriberInterfac
                 return;
             }
 
-            $onlineParticipants = $videoRoomActiveMeeting
-                ->participants
-                ->filter(fn (VideoMeetingParticipant $p) => !$p->endTime);
+            $onlineParticipantsCount = $this->videoMeetingParticipantRepository->count([
+                'videoMeeting' => $videoRoomActiveMeeting,
+                'endTime' => null,
+            ]);
 
-            if ($onlineParticipants->count() > 0) {
+            if ($onlineParticipantsCount > 0) {
                 return;
             }
 
             $videoRoom->doneAt = time();
             $this->videoRoomRepository->save($videoRoom);
-
-            if ($videoRoomActiveMeeting->endTime === null) {
-                $videoRoomActiveMeeting->endTime = $event->unixTimestamp;
-                $this->videoMeetingRepository->save($videoRoomActiveMeeting);
-            }
 
             $this->eventLogManager->logEvent(
                 $videoRoom,
